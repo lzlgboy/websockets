@@ -16,7 +16,11 @@ Changelog
       :exc:`~datastructures.MultipleValuesError` from
       :mod:`websockets.datastructures` instead of :mod:`websockets.http`.
 
-    * :mod:`websockets.handshake` and :mod:`websockets.http` are deprecated.
+    * :mod:`websockets.handshake` is deprecated.
+
+    * :mod:`websockets.http` is deprecated.
+
+    * :mod:`websocket.framing` is deprecated.
 
     Aliases provide backwards compatibility for all previously public APIs.
 

@@ -8,8 +8,8 @@ from websockets.exceptions import (
     InvalidHeaderValue,
     InvalidUpgrade,
 )
-from websockets.handshake import *
-from websockets.handshake import accept  # private API
+from websockets.handshake_legacy import *
+from websockets.handshake_legacy import accept  # private API
 
 
 class HandshakeTests(unittest.TestCase):

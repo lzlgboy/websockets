@@ -1,8 +1,8 @@
 import asyncio
 
 from websockets.exceptions import SecurityError
-from websockets.http import *
-from websockets.http import read_headers
+from websockets.http_legacy import *
+from websockets.http_legacy import read_headers
 
 from .utils import AsyncioTestCase
 

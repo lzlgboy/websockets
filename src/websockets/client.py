@@ -10,6 +10,7 @@ import logging
 import warnings
 from types import TracebackType
 from typing import Any, Generator, List, Optional, Sequence, Tuple, Type, cast
+import urllib.request
 
 from .exceptions import (
     InvalidHandshake,
@@ -33,13 +34,15 @@ from .headers import (
 from .http import USER_AGENT, Headers, HeadersLike, read_response
 from .protocol import WebSocketCommonProtocol
 from .typing import ExtensionHeader, Origin, Subprotocol
-from .uri import WebSocketURI, parse_uri
+from .uri import WebSocketURI, parse_uri, parse_proxy_uri
 
+import ssl as ssllib
 
 __all__ = ["connect", "unix_connect", "WebSocketClientProtocol"]
 
-logger = logging.getLogger(__name__)
+USE_SYSTEM_PROXY = object()
 
+logger = logging.getLogger(__name__)
 
 class WebSocketClientProtocol(WebSocketCommonProtocol):
     """
@@ -221,6 +224,73 @@ class WebSocketClientProtocol(WebSocketCommonProtocol):
 
         return subprotocol
 
+    async def proxy_connect(self, proxy_uri, uri, ssl=None, server_hostname=None):
+        request = ['CONNECT {uri.host}:{uri.port} HTTP/1.1'.format(uri=uri)]
+
+        headers = []
+
+        if uri.port == (443 if uri.secure else 80):     # pragma: no cover
+            headers.append(('Host', uri.host))
+        else:
+            headers.append(('Host', '{uri.host}:{uri.port}'.format(uri=uri)))
+
+        if proxy_uri.user_info:
+            headers.append((
+                'Proxy-Authorization',
+                build_authorization_basic(*proxy_uri.user_info),
+            ))
+
+        request.extend('{}: {}'.format(k, v) for k, v in headers)
+        request.append('\r\n')
+        request = '\r\n'.join(request).encode()
+
+        print("connecting")
+        print(request)
+        print(ssl)
+
+        self.transport.write(request)
+
+        status_code, reason, headers = await read_response(self.reader)
+
+        if not 200 <= status_code < 300:
+            # TODO improve error handling
+            raise ValueError("proxy error: HTTP {}".format(status_code))
+
+        if ssl is not None:
+            # Wrap socket with TLS. This ugly hack will be necessary until
+            # https://bugs.python.org/issue23749 is resolved and websockets
+            # drops support for all early Python versions.
+            if hasattr(asyncio.sslproto, '_is_sslproto_available') and not asyncio.sslproto._is_sslproto_available():
+                raise ValueError(
+                    "connecting to a wss:// server through a proxy isn't "
+                    "supported on Python < 3.5")
+            old_protocol = self
+            old_transport = self.transport
+            ssl2 = ssl
+            if not isinstance(ssl, ssllib.SSLContext):
+                ssl2 = ssllib.create_default_context()
+            self.transport = await self.loop.start_tls(self.transport, self, ssl2)
+            #ssl_connected = asyncio.Future()
+            #new_protocol = asyncio.sslproto.SSLProtocol(
+            #    loop=self.loop,
+            #    app_protocol=old_protocol,
+            #    # taken from _create_connection_transport
+            #    sslcontext=None if isinstance(ssl, bool) else ssl,
+            #    waiter=ssl_connected,
+            #    server_side=False,
+            #    server_hostname=server_hostname,
+            #    call_connection_made=False,
+            #)
+            #new_transport = new_protocol._app_transport
+
+            # Surgery without anesthesia.
+            #old_transport._protocol = new_protocol
+            #self.reader._transport = self.transport
+            #self.writer._transport = self.transport
+            #self.transport = new_transport
+            #new_protocol.connection_made(old_transport)
+            #await ssl_connected
+
     async def handshake(
         self,
         wsuri: WebSocketURI,
@@ -349,6 +419,12 @@ class Connect:
     * ``compression`` is a shortcut to configure compression extensions;
       by default it enables the "permessage-deflate" extension; set it to
       ``None`` to disable compression
+    * ``proxy`` defines the HTTP proxy for establishing the connection; by
+      default, :func:`connect` uses proxies configured in the environment or
+      the system (see :func:`~urllib.request.getproxies` for details); set
+      ``proxy`` to ``None`` to disable this behavior
+    * ``proxy_ssl`` may be set to a :class:`~ssl.SSLContext` to enforce TLS
+      settings for connecting to a ``https://`` proxy; it defaults to ``True``
     * ``origin`` sets the Origin HTTP header
     * ``extensions`` is a list of supported extensions in order of
       decreasing preference
@@ -389,6 +465,8 @@ class Connect:
         extensions: Optional[Sequence[ClientExtensionFactory]] = None,
         subprotocols: Optional[Sequence[Subprotocol]] = None,
         extra_headers: Optional[HeadersLike] = None,
+        proxy_uri=USE_SYSTEM_PROXY, 
+        proxy_ssl=None,
         **kwargs: Any,
     ) -> None:
         # Backwards compatibility: close_timeout used to be called timeout.
@@ -453,20 +531,53 @@ class Connect:
             subprotocols=subprotocols,
             extra_headers=extra_headers,
         )
+        print("PROXY")
+        print(str(proxy_uri))
+        if proxy_uri is USE_SYSTEM_PROXY:
+            proxies = urllib.request.getproxies()
+            if urllib.request.proxy_bypass(
+                    '{wsuri.host}:{wsuri.port}'.format(wsuri=wsuri)):
+                proxy_uri = None
+            else:
+                # RFC 6455 recommends to prefer the proxy configured for HTTPS
+                # connections over the proxy configured for HTTP connections.
+                proxy_uri = proxies.get('https')
+                if proxy_uri is None and not wsuri.secure:
+                    proxy_uri = proxies.get('http')
+        print(str(proxy_uri))
+        
+        if proxy_uri is not None:
+            proxy_uri = parse_proxy_uri(proxy_uri)
+            if proxy_uri.secure:
+                if proxy_ssl is None:
+                    proxy_ssl = True
+            elif proxy_ssl is not None:
+                raise ValueError(
+                    "connect() received a TLS/SSL context for a HTTP proxy; "
+                    "use a HTTPS proxy to enable TLS",
+                )
 
         if path is None:
             host: Optional[str]
             port: Optional[int]
-            if kwargs.get("sock") is None:
-                host, port = wsuri.host, wsuri.port
-            else:
+
+            ssl = kwargs.pop("ssl", None)
+
+            if kwargs.get("sock") is not None:
                 # If sock is given, host and port shouldn't be specified.
-                host, port = None, None
+                conn_host, conn_port, conn_ssl = None, None, ssl
+            elif proxy_uri is not None:
+                conn_host, conn_port, conn_ssl = (
+                proxy_uri.host, proxy_uri.port, proxy_ssl)
+                
+            else:
+                conn_host, conn_port, conn_ssl = wsuri.host, wsuri.port, ssl
+
             # If host and port are given, override values from the URI.
-            host = kwargs.pop("host", host)
-            port = kwargs.pop("port", port)
+            conn_host = kwargs.pop("host", conn_host)
+            conn_port = kwargs.pop("port", conn_port)
             create_connection = functools.partial(
-                loop.create_connection, factory, host, port, **kwargs
+                loop.create_connection, factory, conn_host, conn_port, ssl=conn_ssl, sock=kwargs.get("sock"), **kwargs
             )
         else:
             create_connection = functools.partial(
@@ -476,6 +587,10 @@ class Connect:
         # This is a coroutine function.
         self._create_connection = create_connection
         self._wsuri = wsuri
+        self._proxy_uri = proxy_uri
+        if proxy_uri is not None:
+            self._ssl = ssl
+            self._server_hostname = kwargs.pop('server_hostname', None)
 
     def handle_redirect(self, uri: str) -> None:
         # Update the state of this instance to connect to a new URI.
@@ -539,6 +654,12 @@ class Connect:
 
             try:
                 try:
+                    if self._proxy_uri is not None:
+                        await protocol.proxy_connect(
+                            self._proxy_uri, self._wsuri,
+                            self._ssl, self._server_hostname,
+                        )
+
                     await protocol.handshake(
                         self._wsuri,
                         origin=protocol.origin,

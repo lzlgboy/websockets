@@ -224,11 +224,12 @@ class WebSocketClientProtocol(WebSocketCommonProtocol):
 
         return subprotocol
 
-    async def proxy_connect(self, proxy_uri, uri, ssl=None, server_hostname=None):
+    async def proxy_connect(self, proxy_uri, uri, ssl=None, server_hostname=None, proxy_headers=None):
         request = ['CONNECT {uri.host}:{uri.port} HTTP/1.1'.format(uri=uri)]
 
         headers = []
-
+        if proxy_headers is not None:
+            headers = [*headers, *proxy_headers]
         if uri.port == (443 if uri.secure else 80):     # pragma: no cover
             headers.append(('Host', uri.host))
         else:
@@ -243,10 +244,6 @@ class WebSocketClientProtocol(WebSocketCommonProtocol):
         request.extend('{}: {}'.format(k, v) for k, v in headers)
         request.append('\r\n')
         request = '\r\n'.join(request).encode()
-
-        print("connecting")
-        print(request)
-        print(ssl)
 
         self.transport.write(request)
 
@@ -467,6 +464,7 @@ class Connect:
         extra_headers: Optional[HeadersLike] = None,
         proxy_uri=USE_SYSTEM_PROXY, 
         proxy_ssl=None,
+        proxy_headers=None,        
         **kwargs: Any,
     ) -> None:
         # Backwards compatibility: close_timeout used to be called timeout.
@@ -531,8 +529,6 @@ class Connect:
             subprotocols=subprotocols,
             extra_headers=extra_headers,
         )
-        print("PROXY")
-        print(str(proxy_uri))
         if proxy_uri is USE_SYSTEM_PROXY:
             proxies = urllib.request.getproxies()
             if urllib.request.proxy_bypass(
@@ -544,7 +540,6 @@ class Connect:
                 proxy_uri = proxies.get('https')
                 if proxy_uri is None and not wsuri.secure:
                     proxy_uri = proxies.get('http')
-        print(str(proxy_uri))
         
         if proxy_uri is not None:
             proxy_uri = parse_proxy_uri(proxy_uri)
@@ -591,6 +586,7 @@ class Connect:
         if proxy_uri is not None:
             self._ssl = ssl
             self._server_hostname = kwargs.pop('server_hostname', None)
+            self._proxy_headers = kwargs.pop('proxy_headers', None)
 
     def handle_redirect(self, uri: str) -> None:
         # Update the state of this instance to connect to a new URI.
@@ -658,6 +654,7 @@ class Connect:
                         await protocol.proxy_connect(
                             self._proxy_uri, self._wsuri,
                             self._ssl, self._server_hostname,
+                            self._proxy_headers
                         )
 
                     await protocol.handshake(

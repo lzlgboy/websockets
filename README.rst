@@ -120,8 +120,19 @@ Docs`_ and see for yourself.
 Proxy support
 -------------
 
+This fork merges the proxy support work done in https://github.com/aaugustin/websockets/pull/422 , adapted
+for Python 3.7.  It also adds support for a proxy_headers argument that can be used to deal with proxy authentication
+requirements.
+
+Proxy authentication via NTLM and SSPI
+--------------------------------------
+
+NTLM is a challenge-response authentication protocol
+
+SSPI is a way to get the response using a Window's user's current login (without needing to know their password)
+
 To deal with a proxy requiring NTLM authentication, only when NTLM authentication is needed,
-you can catch the 407 "Proxy Authentication Required" exception and do the NTLM authentication
+you can catch the 407 "Proxy Authentication Required" exception and then do the NTLM authentication, using SSPI,
 to get the value to use for proxy_headers
 
 .. code:: python
@@ -139,8 +150,8 @@ to get the value to use for proxy_headers
         else:
             raise
 
-The aio_proxy_sspi_auth function is provided below.  It's a WIP and doesn't belong inside the websockets package,
-because it's something that should be used  when making requests via aiohttp too.
+The aio_proxy_sspi_auth function is provided below.  It's a work in progress and doesn't belong inside the websockets
+package, because it's something that should be used  when making requests via aiohttp too (see below).
 Also, you can see that this is something that just works for a specific use case (NTLM SSPI, not Kerberos,
 not username/password) so I don't feel it's generic enough to suggest adding to aiohttp at this stage.  Use
 at own risk :)
@@ -249,8 +260,8 @@ at own risk :)
 
         return headers
 
-Corporate proxies are often automatically configured using a PAC approach, so I used pypac to get
-that and store the result in the environ variables, which are picked up by aiohttp
+Corporate proxies are often automatically configured using a PAC approach, so you can use pypac to get
+that and store the result in the environ variables, which are picked up by aiohttp if you set trust_env to true
 
 .. code:: python
 

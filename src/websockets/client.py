@@ -583,10 +583,10 @@ class Connect:
         self._create_connection = create_connection
         self._wsuri = wsuri
         self._proxy_uri = proxy_uri
+        self._proxy_headers = proxy_headers
         if proxy_uri is not None:
             self._ssl = ssl
             self._server_hostname = kwargs.pop('server_hostname', None)
-            self._proxy_headers = kwargs.pop('proxy_headers', None)
 
     def handle_redirect(self, uri: str) -> None:
         # Update the state of this instance to connect to a new URI.

@@ -122,7 +122,7 @@ Proxy support
 
 To deal with a proxy requiring NTLM authentication, only when NTLM authentication is needed,
 you can catch the 407 "Proxy Authentication Required" exception and do the NTLM authentication
-only then, to get the value to use for proxy_headers
+to get the value to use for proxy_headers
 
 .. code:: python
 
@@ -139,8 +139,8 @@ only then, to get the value to use for proxy_headers
         else:
             raise
 
-The aio_proxy_sspi_auth function is provided below.  It doesn't belong inside the websockets package, because
-it's something that should be used also when making requests via aiohttp (that need to go through the proxy).
+The aio_proxy_sspi_auth function is provided below.  It's a WIP and doesn't belong inside the websockets package,
+because it's something that should be used  when making requests via aiohttp too.
 Also, you can see that this is something that just works for a specific use case (NTLM SSPI, not Kerberos,
 not username/password) so I don't feel it's generic enough to suggest adding to aiohttp at this stage.  Use
 at own risk :)
@@ -264,8 +264,8 @@ that and store the result in the environ variables, which are picked up by aioht
                 os.environ['HTTPS_PROXY'] = proxies.get('https') or ''
                 logger.info(f"Proxy Auto Config: HTTP:{os.environ['HTTP_PROXY']} HTTPS:{os.environ['HTTPS_PROXY']}")
 
-Lastly, if you ALSO have to do normal web requests and not just websockets, you need a similar 407 challenge
-response handler when building request:
+Lastly, if you also have to do normal web requests and not just websockets, you need a similar 407 challenge
+response handler when doing such requests:
 
 .. code:: python
 

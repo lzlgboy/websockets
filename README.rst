@@ -117,6 +117,177 @@ Docs`_ and see for yourself.
 .. _handle backpressure correctly: https://vorpus.org/blog/some-thoughts-on-asynchronous-api-design-in-a-post-asyncawait-world/#websocket-servers
 .. _Autobahn Testsuite: https://github.com/aaugustin/websockets/blob/master/compliance/README.rst
 
+Proxy support
+-------------
+
+To deal with a proxy requiring NTLM authentication, only when NTLM authentication is needed,
+you can catch the 407 "Proxy Authentication Required" exception and do the NTLM authentication
+only then, to get the value to use for proxy_headers
+
+.. code:: python
+
+    try:
+        self.socket = await websockets.connect(url, proxy_headers=self.proxy_headers)
+    except ValueError as e:
+        if "407" in str(e):
+            self.proxy_headers = await get_proxy_auth_header_sspi(self.sfp.get_session(), os.environ['HTTPS_PROXY'] if url.startswith("wss") else os.environ['HTTP_PROXY'])
+
+            # headers are returned in a name-value dictionary but websockets use list of tuples so convert..
+            self.proxy_headers = list(self.proxy_headers.items())
+
+            self.socket = await websockets.connect(url, proxy_headers=self.proxy_headers)
+        else:
+            raise
+
+The aio_proxy_sspi_auth function is provided below.  It doesn't belong inside the websockets package, because
+it's something that should be used also when making requests via aiohttp (that need to go through the proxy).
+Also, you can see that this is something that just works for a specific use case (NTLM SSPI, not Kerberos,
+not username/password) so I don't feel it's generic enough to suggest adding to aiohttp at this stage.  Use
+at own risk :)
+
+.. code:: python
+
+    import base64
+    import hashlib
+    import logging
+    import socket
+    import struct
+
+
+    import pywintypes
+    import sspi
+    import sspicon
+    import win32security
+
+    try:
+        from urllib.parse import urlparse
+    except ImportError:
+        from urlparse import urlparse
+
+    _logger = logging.getLogger(__name__)
+
+    async def get_proxy_auth_header_sspi(session, proxy_url, peercert = None, delegate=False, host=None):
+        """Performs a GET request against the proxy server to start and complete an NTLM authentication process
+
+        Invoke this after getting a 407 error.  Returns the proxy_headers to use going forwards (in dict format)
+
+        Overview of the protocol/exchange: https://docs.microsoft.com/en-us/openspecs/office_protocols/ms-grvhenc/b9e676e7-e787-4020-9840-7cfe7c76044a
+
+        Inspired by: https://github.com/brandond/requests-negotiate-sspi/blob/master/requests_negotiate_sspi/requests_negotiate_sspi.py
+        (But this is async, and it's for proxy auth not normal www auth)
+        """
+        scheme = 'NTLM'
+
+        host = None
+        if host is None:
+            targeturl = urlparse(proxy_url)
+            host= targeturl.hostname
+            try:
+                host= socket.getaddrinfo(host, None, 0, 0, 0, socket.AI_CANONNAME)[0][3]
+            except socket.gaierror as e:
+                _logger.info('Skipping canonicalization of name %s due to error: %s', host, e)
+
+        targetspn = '{}/{}'.format("HTTP", host)
+
+        # Set up SSPI connection structure
+        pkg_info = win32security.QuerySecurityPackageInfo(scheme)
+        clientauth = sspi.ClientAuth(scheme, targetspn=targetspn)#, auth_info=self._auth_info)
+        sec_buffer = win32security.PySecBufferDescType()
+
+        # Calling sspi.ClientAuth with scflags set requires you to specify all the flags, including defaults.
+        # We just want to add ISC_REQ_DELEGATE.
+        #if delegate:
+        #    clientauth.scflags |= sspicon.ISC_REQ_DELEGATE
+
+        # Channel Binding Hash (aka Extended Protection for Authentication)
+        # If this is a SSL connection, we need to hash the peer certificate, prepend the RFC5929 channel binding type,
+        # and stuff it into a SEC_CHANNEL_BINDINGS structure.
+        # This should be sent along in the initial handshake or Kerberos auth will fail.
+        if peercert is not None:
+            md = hashlib.sha256()
+            md.update(peercert)
+            appdata = 'tls-server-end-point:'.encode('ASCII')+md.digest()
+            cbtbuf = win32security.PySecBufferType(pkg_info['MaxToken'], sspicon.SECBUFFER_CHANNEL_BINDINGS)
+            cbtbuf.Buffer = struct.pack('LLLLLLLL{}s'.format(len(appdata)), 0, 0, 0, 0, 0, 0, len(appdata), 32, appdata)
+            sec_buffer.append(cbtbuf)
+
+        # Send initial challenge auth header
+        try:
+            error, auth = clientauth.authorize(sec_buffer)
+            headers = {'Proxy-Authorization': f'{scheme} {base64.b64encode(auth[0].Buffer).decode("ASCII")}'}
+            response2 = await session.get(proxy_url, headers=headers)
+
+            _logger.debug('Got response: ' + str(response2))
+            #Sending Initial Context Token - error={} authenticated={}'.format(error, clientauth.authenticated))
+        except pywintypes.error as e:
+            _logger.debug('Error calling {}: {}'.format(e[1], e[2]), exc_info=e)
+            raise
+
+        # expect to get 407 error and proxy-authenticate header
+        if response2.status != 407:
+            raise Exception(f'Expected 407, got {res.status} status code')
+
+        # Extract challenge message from server
+        challenge = [val[len(scheme)+1:] for val in response2.headers.get('proxy-Authenticate', '').split(', ') if scheme in val]
+        if len(challenge) != 1:
+            raise Exception('Did not get exactly one {} challenge from server.'.format(scheme))
+
+        # Add challenge to security buffer
+        tokenbuf = win32security.PySecBufferType(pkg_info['MaxToken'], sspicon.SECBUFFER_TOKEN)
+        tokenbuf.Buffer = base64.b64decode(challenge[0])
+        sec_buffer.append(tokenbuf)
+        _logger.debug('Got Challenge Token (NTLM)')
+
+        # Perform next authorization step
+        try:
+            error, auth = clientauth.authorize(sec_buffer)
+            headers = {'proxy-Authorization': '{} {}'.format(scheme, base64.b64encode(auth[0].Buffer).decode('ASCII'))}
+            _logger.debug(str(headers))
+        except pywintypes.error as e:
+            _logger.debug('Error calling {}: {}'.format(e[1], e[2]), exc_info=e)
+            raise
+
+        return headers
+
+Corporate proxies are often automatically configured using a PAC approach, so I used pypac to get
+that and store the result in the environ variables, which are picked up by aiohttp
+
+.. code:: python
+
+        if auto_proxy_config:
+            import pypac
+            pac = pypac.get_pac()
+            if pac:
+                resolver = pypac.resolver.ProxyResolver(pac)
+                proxies = resolver.get_proxy_for_requests(url)
+                os.environ['HTTP_PROXY'] = proxies.get('http') or ''
+                os.environ['HTTPS_PROXY'] = proxies.get('https') or ''
+                logger.info(f"Proxy Auto Config: HTTP:{os.environ['HTTP_PROXY']} HTTPS:{os.environ['HTTPS_PROXY']}")
+
+Lastly, if you ALSO have to do normal web requests and not just websockets, you need a similar 407 challenge
+response handler when building request:
+
+.. code:: python
+
+
+    def get_session(self):
+        if not hasattr(self, 'session'):
+            # trust_env means read HTTPS_PROXY from environment
+            self.session = ClientSession(trust_env=True)
+        return self.session
+
+    #... and then when you need to do a request
+        try:
+            res = await self.session.post(url, json=body, proxy_headers=self.proxy_headers)
+        except ClientHttpProxyError as e:
+            if e.status == 407:
+                logger.info("Proxy 407 error occurred - starting proxy NTLM auth negotiation")
+                self.proxy_headers = await get_proxy_auth_header_sspi(self.session, os.environ['HTTPS_PROXY'] if self.url.startswith("https") else os.environ['HTTP_PROXY'])
+                res = await self.session.post(self.url, json=body, proxy_headers=self.proxy_headers)
+            else:
+                raise
+
+
 Why shouldn't I use ``websockets``?
 -----------------------------------
 
